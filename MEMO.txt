@@ -1,0 +1,15 @@
+CPU 기반 구동
+docker run -d -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama 
+
+GPU 기반 구동
+docker run -d --gpus=all -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
+
+reommand
+docker run -d --gpus=all -p 3000:8080 --add-host=host.docker.internal:host-gateway -v open-webui:/app/backend/data --name open-webui --restart always ghcr.io/open-webui/open-webui:main
+
+
+docker stop
+docker start
+
+url: 
+http://localhost:11434
