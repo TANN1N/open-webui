@@ -13,3 +13,9 @@ docker start
 
 url: 
 http://localhost:11434
+
+How to update
+1. docker pull ghcr.io/open-webui/open-webui:main
+2. docker stop open-webui
+3. docker rm open-webui
+4. run
