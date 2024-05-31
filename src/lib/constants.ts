@@ -1,8 +1,8 @@
-import { dev } from '$app/environment';
+import { browser, dev } from '$app/environment';
 // import { version } from '../../package.json';
 
 export const APP_NAME = 'Open WebUI';
-export const WEBUI_BASE_URL = dev ? `http://${location.hostname}:8080` : ``;
+export const WEBUI_BASE_URL = browser ? (dev ? `http://${location.hostname}:8080` : ``) : ``;
 
 export const WEBUI_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1`;
 
@@ -22,6 +22,7 @@ export const SUPPORTED_FILE_TYPE = [
 	'text/plain',
 	'text/csv',
 	'text/xml',
+	'text/html',
 	'text/x-python',
 	'text/css',
 	'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -50,6 +51,8 @@ export const SUPPORTED_FILE_EXTENSIONS = [
 	'h',
 	'c',
 	'cs',
+	'htm',
+	'html',
 	'sql',
 	'log',
 	'ini',
@@ -83,7 +86,9 @@ export const SUPPORTED_FILE_EXTENSIONS = [
 	'csv',
 	'txt',
 	'xls',
-	'xlsx'
+	'xlsx',
+	'pptx',
+	'ppt'
 ];
 
 // Source: https://kit.svelte.dev/docs/modules#$env-static-public
