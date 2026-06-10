@@ -3,19 +3,114 @@
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
 
-	import { onMount, getContext } from 'svelte';
-	import { WEBUI_NAME, prompts } from '$lib/stores';
-	import { createNewPrompt, deletePromptByCommand, getPrompts } from '$lib/apis/prompts';
-	import { error } from '@sveltejs/kit';
 	import { goto } from '$app/navigation';
+	import { onMount, getContext, tick, onDestroy } from 'svelte';
+	import { WEBUI_NAME, config, user } from '$lib/stores';
+
+	import {
+		createNewPrompt,
+		deletePromptById,
+		togglePromptById,
+		getPromptItems,
+		getPromptTags
+	} from '$lib/apis/prompts';
+	import { capitalizeFirstLetter, slugify, copyToClipboard } from '$lib/utils';
+
+	import PromptMenu from './Prompts/PromptMenu.svelte';
+	import EllipsisHorizontal from '../icons/EllipsisHorizontal.svelte';
+	import Clipboard from '../icons/Clipboard.svelte';
+	import Check from '../icons/Check.svelte';
+	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import Search from '../icons/Search.svelte';
+	import Plus from '../icons/Plus.svelte';
+	import ChevronRight from '../icons/ChevronRight.svelte';
+	import Spinner from '../common/Spinner.svelte';
+	import Tooltip from '../common/Tooltip.svelte';
+	import XMark from '../icons/XMark.svelte';
+	import GarbageBin from '../icons/GarbageBin.svelte';
+	import ViewSelector from './common/ViewSelector.svelte';
+	import TagSelector from './common/TagSelector.svelte';
+	import Badge from '$lib/components/common/Badge.svelte';
+	import Switch from '../common/Switch.svelte';
+	import Pagination from '../common/Pagination.svelte';
+
+	let shiftKey = false;
 
 	const i18n = getContext('i18n');
-
-	let importFiles = '';
-	let query = '';
 	let promptsImportInputElement: HTMLInputElement;
-	const sharePrompt = async (prompt) => {
-		toast.success($i18n.t('Redirecting you to OpenWebUI Community'));
+	let loaded = false;
+
+	let importFiles = null;
+	let query = '';
+	let searchDebounceTimer: ReturnType<typeof setTimeout>;
+
+	let prompts = null;
+	let tags = [];
+	let total = null;
+	let loading = false;
+
+	let showDeleteConfirm = false;
+	let deletePrompt = null;
+
+	let tagsContainerElement: HTMLDivElement;
+	let viewOption = '';
+	let selectedTag = '';
+	let copiedId: string | null = null;
+
+	let page = 1;
+
+	// Debounce only query changes
+	$: if (query !== undefined) {
+		loading = true;
+		clearTimeout(searchDebounceTimer);
+		searchDebounceTimer = setTimeout(() => {
+			page = 1;
+			getPromptList();
+		}, 300);
+	}
+
+	// Immediate response to page/filter changes
+	$: if (page && selectedTag !== undefined && viewOption !== undefined) {
+		getPromptList();
+	}
+
+	const getPromptList = async () => {
+		if (!loaded) return;
+
+		loading = true;
+		try {
+			const res = await getPromptItems(
+				localStorage.token,
+				query,
+				viewOption,
+				selectedTag,
+				null,
+				null,
+				page
+			).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+
+			if (res) {
+				prompts = res.items;
+				total = res.total;
+
+				// get tags
+				tags = await getPromptTags(localStorage.token).catch((error) => {
+					toast.error(`${error}`);
+					return [];
+				});
+			}
+		} catch (err) {
+			console.error(err);
+		} finally {
+			loading = false;
+		}
+	};
+
+	const shareHandler = async (prompt) => {
+		toast.success($i18n.t('Redirecting you to Open WebUI Community'));
 
 		const url = 'https://openwebui.com';
 
@@ -32,179 +127,109 @@
 		);
 	};
 
-	const deletePrompt = async (command) => {
-		await deletePromptByCommand(localStorage.token, command);
-		await prompts.set(await getPrompts(localStorage.token));
+	const cloneHandler = async (prompt) => {
+		const clonedPrompt = { ...prompt };
+
+		clonedPrompt.title = `${clonedPrompt.title} (Clone)`;
+		const baseCommand = clonedPrompt.command.startsWith('/')
+			? clonedPrompt.command.substring(1)
+			: clonedPrompt.command;
+		clonedPrompt.command = slugify(`${baseCommand} clone`);
+
+		sessionStorage.prompt = JSON.stringify(clonedPrompt);
+		goto('/workspace/prompts/create');
 	};
+
+	const exportHandler = async (prompt) => {
+		let blob = new Blob([JSON.stringify([prompt])], {
+			type: 'application/json'
+		});
+		saveAs(blob, `prompt-export-${Date.now()}.json`);
+	};
+
+	const copyHandler = async (prompt) => {
+		const res = await copyToClipboard(prompt.content);
+		if (res) {
+			copiedId = prompt.command;
+			setTimeout(() => {
+				copiedId = null;
+			}, 2000);
+		}
+	};
+
+	const deleteHandler = async (prompt) => {
+		const command = prompt.command;
+
+		const res = await deletePromptById(localStorage.token, prompt.id).catch((err) => {
+			toast.error(err);
+			return null;
+		});
+
+		if (res) {
+			toast.success($i18n.t(`Deleted {{name}}`, { name: command }));
+		}
+
+		page = 1;
+		getPromptList();
+	};
+
+	onMount(async () => {
+		viewOption = localStorage?.workspaceViewOption || '';
+		loaded = true;
+
+		const onKeyDown = (event) => {
+			if (event.key === 'Shift') {
+				shiftKey = true;
+			}
+		};
+
+		const onKeyUp = (event) => {
+			if (event.key === 'Shift') {
+				shiftKey = false;
+			}
+		};
+
+		const onBlur = () => {
+			shiftKey = false;
+		};
+
+		window.addEventListener('keydown', onKeyDown);
+		window.addEventListener('keyup', onKeyUp);
+		window.addEventListener('blur', onBlur);
+
+		return () => {
+			clearTimeout(searchDebounceTimer);
+			window.removeEventListener('keydown', onKeyDown);
+			window.removeEventListener('keyup', onKeyUp);
+			window.removeEventListener('blur', onBlur);
+		};
+	});
+
+	onDestroy(() => {
+		clearTimeout(searchDebounceTimer);
+	});
 </script>
 
 <svelte:head>
 	<title>
-		{$i18n.t('Prompts')} | {$WEBUI_NAME}
+		{$i18n.t('Prompts')} • {$WEBUI_NAME}
 	</title>
 </svelte:head>
 
-<div class="mb-3 flex justify-between items-center">
-	<div class=" text-lg font-semibold self-center">{$i18n.t('Prompts')}</div>
-</div>
-
-<div class=" flex w-full space-x-2">
-	<div class="flex flex-1">
-		<div class=" self-center ml-1 mr-3">
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				viewBox="0 0 20 20"
-				fill="currentColor"
-				class="w-4 h-4"
-			>
-				<path
-					fill-rule="evenodd"
-					d="M9 3.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11zM2 9a7 7 0 1112.452 4.391l3.328 3.329a.75.75 0 11-1.06 1.06l-3.329-3.328A7 7 0 012 9z"
-					clip-rule="evenodd"
-				/>
-			</svg>
+{#if loaded}
+	<DeleteConfirmDialog
+		bind:show={showDeleteConfirm}
+		title={$i18n.t('Delete prompt?')}
+		on:confirm={() => {
+			deleteHandler(deletePrompt);
+		}}
+	>
+		<div class=" text-sm text-gray-500 truncate">
+			{$i18n.t('This will delete')} <span class="  font-medium">{deletePrompt.command}</span>.
 		</div>
-		<input
-			class=" w-full text-sm pr-4 py-1 rounded-r-xl outline-none bg-transparent"
-			bind:value={query}
-			placeholder={$i18n.t('Search Prompts')}
-		/>
-	</div>
+	</DeleteConfirmDialog>
 
-	<div>
-		<a
-			class=" px-2 py-2 rounded-xl border border-gray-200 dark:border-gray-600 dark:border-0 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 transition font-medium text-sm flex items-center space-x-1"
-			href="/workspace/prompts/create"
-		>
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				viewBox="0 0 16 16"
-				fill="currentColor"
-				class="w-4 h-4"
-			>
-				<path
-					d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z"
-				/>
-			</svg>
-		</a>
-	</div>
-</div>
-<hr class=" dark:border-gray-850 my-2.5" />
-
-<div class="my-3 mb-5">
-	{#each $prompts.filter((p) => query === '' || p.command.includes(query)) as prompt}
-		<div
-			class=" flex space-x-4 cursor-pointer w-full px-3 py-2 dark:hover:bg-white/5 hover:bg-black/5 rounded-xl"
-		>
-			<div class=" flex flex-1 space-x-4 cursor-pointer w-full">
-				<a href={`/workspace/prompts/edit?command=${encodeURIComponent(prompt.command)}`}>
-					<div class=" flex-1 self-center pl-5">
-						<div class=" font-bold">{prompt.command}</div>
-						<div class=" text-xs overflow-hidden text-ellipsis line-clamp-1">
-							{prompt.title}
-						</div>
-					</div>
-				</a>
-			</div>
-			<div class="flex flex-row space-x-1 self-center">
-				<a
-					class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
-					type="button"
-					href={`/workspace/prompts/edit?command=${encodeURIComponent(prompt.command)}`}
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="1.5"
-						stroke="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
-						/>
-					</svg>
-				</a>
-
-				<button
-					class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
-					type="button"
-					on:click={() => {
-						// console.log(modelfile);
-						sessionStorage.prompt = JSON.stringify(prompt);
-						goto('/workspace/prompts/create');
-					}}
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="1.5"
-						stroke="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75"
-						/>
-					</svg>
-				</button>
-
-				<button
-					class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
-					type="button"
-					on:click={() => {
-						sharePrompt(prompt);
-					}}
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="1.5"
-						stroke="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z"
-						/>
-					</svg>
-				</button>
-
-				<button
-					class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
-					type="button"
-					on:click={() => {
-						deletePrompt(prompt.command);
-					}}
-				>
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke-width="1.5"
-						stroke="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0"
-						/>
-					</svg>
-				</button>
-			</div>
-		</div>
-	{/each}
-</div>
-
-<div class=" flex justify-end w-full mb-3">
-	<div class="flex space-x-2">
+	<div class="flex flex-col gap-1 px-1 mt-1.5 mb-3">
 		<input
 			id="prompts-import-input"
 			bind:this={promptsImportInputElement}
@@ -214,118 +239,322 @@
 			hidden
 			on:change={() => {
 				console.log(importFiles);
+				if (!importFiles || importFiles.length === 0) return;
 
 				const reader = new FileReader();
 				reader.onload = async (event) => {
 					const savedPrompts = JSON.parse(event.target.result);
 					console.log(savedPrompts);
 
-					for (const prompt of savedPrompts) {
-						await createNewPrompt(
-							localStorage.token,
-							prompt.command.charAt(0) === '/' ? prompt.command.slice(1) : prompt.command,
-							prompt.title,
-							prompt.content
-						).catch((error) => {
-							toast.error(error);
-							return null;
-						});
-					}
+					try {
+						for (const prompt of savedPrompts) {
+							await createNewPrompt(localStorage.token, {
+								command: prompt.command,
+								name: prompt.name,
+								content: prompt.content
+							}).catch((error) => {
+								toast.error(typeof error === 'string' ? error : JSON.stringify(error));
+								return null;
+							});
+						}
 
-					await prompts.set(await getPrompts(localStorage.token));
+						page = 1;
+						await getPromptList();
+					} finally {
+						importFiles = null;
+						promptsImportInputElement.value = '';
+					}
 				};
 
 				reader.readAsText(importFiles[0]);
 			}}
 		/>
+		<div class="flex justify-between items-center">
+			<div class="flex items-center md:self-center text-xl font-medium px-0.5 gap-2 shrink-0">
+				<div>
+					{$i18n.t('Prompts')}
+				</div>
 
-		<button
-			class="flex text-xs items-center space-x-1 px-3 py-1.5 rounded-xl bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 dark:text-gray-200 transition"
-			on:click={() => {
-				promptsImportInputElement.click();
-			}}
-		>
-			<div class=" self-center mr-2 font-medium">{$i18n.t('Import Prompts')}</div>
-
-			<div class=" self-center">
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					viewBox="0 0 16 16"
-					fill="currentColor"
-					class="w-4 h-4"
-				>
-					<path
-						fill-rule="evenodd"
-						d="M4 2a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6.621a1.5 1.5 0 0 0-.44-1.06L9.94 2.439A1.5 1.5 0 0 0 8.878 2H4Zm4 9.5a.75.75 0 0 1-.75-.75V8.06l-.72.72a.75.75 0 0 1-1.06-1.06l2-2a.75.75 0 0 1 1.06 0l2 2a.75.75 0 1 1-1.06 1.06l-.72-.72v2.69a.75.75 0 0 1-.75.75Z"
-						clip-rule="evenodd"
-					/>
-				</svg>
+				<div class="text-lg font-medium text-gray-500 dark:text-gray-500">
+					{total ?? ''}
+				</div>
 			</div>
-		</button>
 
-		<button
-			class="flex text-xs items-center space-x-1 px-3 py-1.5 rounded-xl bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 dark:text-gray-200 transition"
-			on:click={async () => {
-				// promptsImportInputElement.click();
-				let blob = new Blob([JSON.stringify($prompts)], {
-					type: 'application/json'
-				});
-				saveAs(blob, `prompts-export-${Date.now()}.json`);
-			}}
-		>
-			<div class=" self-center mr-2 font-medium">{$i18n.t('Export Prompts')}</div>
-
-			<div class=" self-center">
-				<svg
-					xmlns="http://www.w3.org/2000/svg"
-					viewBox="0 0 16 16"
-					fill="currentColor"
-					class="w-4 h-4"
-				>
-					<path
-						fill-rule="evenodd"
-						d="M4 2a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6.621a1.5 1.5 0 0 0-.44-1.06L9.94 2.439A1.5 1.5 0 0 0 8.878 2H4Zm4 3.5a.75.75 0 0 1 .75.75v2.69l.72-.72a.75.75 0 1 1 1.06 1.06l-2 2a.75.75 0 0 1-1.06 0l-2-2a.75.75 0 0 1 1.06-1.06l.72.72V6.25A.75.75 0 0 1 8 5.5Z"
-						clip-rule="evenodd"
-					/>
-				</svg>
-			</div>
-		</button>
-
-		<!-- <button
+			<div class="flex w-full justify-end gap-1.5">
+				{#if $user?.role === 'admin' || $user?.permissions?.workspace?.prompts_import}
+					<button
+						class="flex text-xs items-center space-x-1 px-3 py-1.5 rounded-xl bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-200 transition"
 						on:click={() => {
-							loadDefaultPrompts();
+							promptsImportInputElement.click();
 						}}
 					>
-						dd
-					</button> -->
+						<div class=" self-center font-medium line-clamp-1">
+							{$i18n.t('Import')}
+						</div>
+					</button>
+				{/if}
+
+				{#if total && ($user?.role === 'admin' || $user?.permissions?.workspace?.prompts_export)}
+					<button
+						class="flex text-xs items-center space-x-1 px-3 py-1.5 rounded-xl bg-gray-50 hover:bg-gray-100 dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-gray-200 transition"
+						on:click={async () => {
+							let blob = new Blob([JSON.stringify(prompts)], {
+								type: 'application/json'
+							});
+							saveAs(blob, `prompts-export-${Date.now()}.json`);
+						}}
+					>
+						<div class=" self-center font-medium line-clamp-1">
+							{$i18n.t('Export')}
+						</div>
+					</button>
+				{/if}
+				<a
+					class=" px-2 py-1.5 rounded-xl bg-black text-white dark:bg-white dark:text-black transition font-medium text-sm flex items-center"
+					href="/workspace/prompts/create"
+				>
+					<Plus className="size-3" strokeWidth="2.5" />
+
+					<div class=" hidden md:block md:ml-1 text-xs">{$i18n.t('New Prompt')}</div>
+				</a>
+			</div>
+		</div>
 	</div>
-</div>
 
-<div class=" my-16">
-	<div class=" text-lg font-semibold mb-3">{$i18n.t('Made by OpenWebUI Community')}</div>
-
-	<a
-		class=" flex space-x-4 cursor-pointer w-full mb-3 px-3 py-2"
-		href="https://openwebui.com/?type=prompts"
-		target="_blank"
+	<div
+		class="py-2 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30"
 	>
-		<div class=" self-center w-10">
-			<div
-				class="w-full h-10 flex justify-center rounded-full bg-transparent dark:bg-gray-700 border border-dashed border-gray-200"
-			>
-				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-6">
-					<path
-						fill-rule="evenodd"
-						d="M12 3.75a.75.75 0 01.75.75v6.75h6.75a.75.75 0 010 1.5h-6.75v6.75a.75.75 0 01-1.5 0v-6.75H4.5a.75.75 0 010-1.5h6.75V4.5a.75.75 0 01.75-.75z"
-						clip-rule="evenodd"
-					/>
-				</svg>
+		<div class=" flex w-full space-x-2 py-0.5 px-3.5 pb-2">
+			<div class="flex flex-1">
+				<div class=" self-center ml-1 mr-3">
+					<Search className="size-3.5" />
+				</div>
+				<input
+					class=" w-full text-sm pr-4 py-1 rounded-r-xl outline-hidden bg-transparent"
+					bind:value={query}
+					aria-label={$i18n.t('Search Prompts')}
+					placeholder={$i18n.t('Search Prompts')}
+				/>
+
+				{#if query}
+					<div class="self-center pl-1.5 translate-y-[0.5px] rounded-l-xl bg-transparent">
+						<button
+							class="p-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+							aria-label={$i18n.t('Clear search')}
+							on:click={() => {
+								query = '';
+							}}
+						>
+							<XMark className="size-3" strokeWidth="2" />
+						</button>
+					</div>
+				{/if}
 			</div>
 		</div>
 
-		<div class=" self-center">
-			<div class=" font-bold">{$i18n.t('Discover a prompt')}</div>
-			<div class=" text-sm">{$i18n.t('Discover, download, and explore custom prompts')}</div>
+		<div
+			class="px-3 flex w-full bg-transparent overflow-x-auto scrollbar-none -mx-1"
+			on:wheel={(e) => {
+				if (e.deltaY !== 0) {
+					e.preventDefault();
+					e.currentTarget.scrollLeft += e.deltaY;
+				}
+			}}
+		>
+			<div
+				class="flex gap-0.5 w-fit text-center text-sm rounded-full bg-transparent px-1.5 whitespace-nowrap"
+				bind:this={tagsContainerElement}
+			>
+				<ViewSelector
+					bind:value={viewOption}
+					onChange={async (value) => {
+						localStorage.workspaceViewOption = value;
+						page = 1;
+						await tick();
+					}}
+				/>
+
+				{#if (tags ?? []).length > 0}
+					<TagSelector
+						bind:value={selectedTag}
+						items={tags.map((tag) => ({ value: tag, label: tag }))}
+					/>
+				{/if}
+			</div>
 		</div>
-	</a>
-</div>
+
+		{#if prompts === null || loading}
+			<div class="w-full h-full flex justify-center items-center my-16 mb-24">
+				<Spinner className="size-5" />
+			</div>
+		{:else if (prompts ?? []).length !== 0}
+			<!-- Before they call, I will answer; while they are yet speaking, I will hear. -->
+			<div class="gap-2 grid my-2 px-3 lg:grid-cols-2">
+				{#each prompts as prompt (prompt.id)}
+					<a
+						class=" flex space-x-4 cursor-pointer text-left w-full px-3 py-2.5 dark:hover:bg-gray-850/50 hover:bg-gray-50 transition rounded-2xl"
+						href={`/workspace/prompts/${prompt.id}`}
+					>
+						<div class=" flex flex-col flex-1 space-x-4 cursor-pointer w-full pl-1">
+							<div class="flex items-center justify-between w-full mb-0.5">
+								<div class="flex items-center gap-2">
+									<div class="font-medium line-clamp-1 capitalize">{prompt.name}</div>
+									<div class="text-xs overflow-hidden text-ellipsis line-clamp-1 text-gray-500">
+										/{prompt.command}
+									</div>
+								</div>
+								{#if !prompt.write_access}
+									<Badge type="muted" content={$i18n.t('Read Only')} />
+								{/if}
+							</div>
+
+							<div class="flex gap-1 text-xs">
+								<Tooltip
+									content={prompt?.user?.email ?? $i18n.t('Deleted User')}
+									className="flex shrink-0"
+									placement="top-start"
+								>
+									<div class="shrink-0 text-gray-500">
+										{$i18n.t('By {{name}}', {
+											name: capitalizeFirstLetter(
+												prompt?.user?.name ?? prompt?.user?.email ?? $i18n.t('Deleted User')
+											)
+										})}
+									</div>
+								</Tooltip>
+
+								<div>·</div>
+
+								{#if prompt.content}
+									<Tooltip content={prompt.content} placement="top">
+										<div class="line-clamp-1">
+											{prompt.content}
+										</div>
+									</Tooltip>
+								{/if}
+							</div>
+						</div>
+						<div class="flex flex-row gap-0.5 self-center">
+							{#if shiftKey}
+								<Tooltip content={$i18n.t('Delete')}>
+									<button
+										class="self-center w-fit text-sm px-2 py-2 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+										type="button"
+										aria-label={$i18n.t('Delete')}
+										on:click={() => {
+											deleteHandler(prompt);
+										}}
+									>
+										<GarbageBin />
+									</button>
+								</Tooltip>
+							{:else}
+								<Tooltip content={$i18n.t('Copy Prompt')}>
+									<button
+										class="self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+										type="button"
+										aria-label={$i18n.t('Copy Prompt')}
+										on:click={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											copyHandler(prompt);
+										}}
+									>
+										{#if copiedId === prompt.command}
+											<Check className="size-4" strokeWidth="1.5" />
+										{:else}
+											<Clipboard className="size-4" strokeWidth="1.5" />
+										{/if}
+									</button>
+								</Tooltip>
+								<PromptMenu
+									shareHandler={() => {
+										shareHandler(prompt);
+									}}
+									cloneHandler={() => {
+										cloneHandler(prompt);
+									}}
+									exportHandler={() => {
+										exportHandler(prompt);
+									}}
+									deleteHandler={async () => {
+										deletePrompt = prompt;
+										showDeleteConfirm = true;
+									}}
+									onClose={() => {}}
+								>
+									<button
+										class="self-center w-fit text-sm p-1.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-xl"
+										type="button"
+									>
+										<EllipsisHorizontal className="size-5" />
+									</button>
+								</PromptMenu>
+
+								<button on:click|stopPropagation|preventDefault>
+									<Tooltip
+										content={prompt.is_active !== false ? $i18n.t('Enabled') : $i18n.t('Disabled')}
+									>
+										<Switch
+											bind:state={prompt.is_active}
+											on:change={async () => {
+												togglePromptById(localStorage.token, prompt.id);
+											}}
+										/>
+									</Tooltip>
+								</button>
+							{/if}
+						</div>
+					</a>
+				{/each}
+			</div>
+
+			{#if total > 30}
+				<div class="flex justify-center mt-4 mb-2">
+					<Pagination bind:page count={total} perPage={30} />
+				</div>
+			{/if}
+		{:else}
+			<div class=" w-full h-full flex flex-col justify-center items-center my-16 mb-24">
+				<div class="max-w-md text-center">
+					<div class=" text-3xl mb-3">😕</div>
+					<div class=" text-lg font-medium mb-1">{$i18n.t('No prompts found')}</div>
+					<div class=" text-gray-500 text-center text-xs">
+						{$i18n.t('Try adjusting your search or filter to find what you are looking for.')}
+					</div>
+				</div>
+			</div>
+		{/if}
+	</div>
+
+	{#if $config?.features.enable_community_sharing}
+		<div class=" my-16">
+			<div class=" text-xl font-medium mb-1 line-clamp-1">
+				{$i18n.t('Made by Open WebUI Community')}
+			</div>
+
+			<a
+				class=" flex cursor-pointer items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-850 w-full mb-2 px-3.5 py-1.5 rounded-xl transition"
+				href="https://openwebui.com/prompts"
+				target="_blank"
+			>
+				<div class=" self-center">
+					<div class=" font-medium line-clamp-1">{$i18n.t('Discover a prompt')}</div>
+					<div class=" text-sm line-clamp-1">
+						{$i18n.t('Discover, download, and explore custom prompts')}
+					</div>
+				</div>
+
+				<div>
+					<div>
+						<ChevronRight />
+					</div>
+				</div>
+			</a>
+		</div>
+	{/if}
+{:else}
+	<div class="w-full h-full flex justify-center items-center">
+		<Spinner className="size-5" />
+	</div>
+{/if}

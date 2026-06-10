@@ -15,7 +15,7 @@ export const getAudioConfig = async (token: string) => {
 			return res.json();
 		})
 		.catch((err) => {
-			console.log(err);
+			console.error(err);
 			error = err.detail;
 			return null;
 		});
@@ -52,7 +52,7 @@ export const updateAudioConfig = async (token: string, payload: OpenAIConfigForm
 			return res.json();
 		})
 		.catch((err) => {
-			console.log(err);
+			console.error(err);
 			error = err.detail;
 			return null;
 		});
@@ -64,9 +64,12 @@ export const updateAudioConfig = async (token: string, payload: OpenAIConfigForm
 	return res;
 };
 
-export const transcribeAudio = async (token: string, file: File) => {
+export const transcribeAudio = async (token: string, file: File, language?: string) => {
 	const data = new FormData();
 	data.append('file', file);
+	if (language) {
+		data.append('language', language);
+	}
 
 	let error = null;
 	const res = await fetch(`${AUDIO_API_BASE_URL}/transcriptions`, {
@@ -83,7 +86,7 @@ export const transcribeAudio = async (token: string, file: File) => {
 		})
 		.catch((err) => {
 			error = err.detail;
-			console.log(err);
+			console.error(err);
 			return null;
 		});
 
@@ -98,7 +101,7 @@ export const synthesizeOpenAISpeech = async (
 	token: string = '',
 	speaker: string = 'alloy',
 	text: string = '',
-	model: string = 'tts-1'
+	model?: string
 ) => {
 	let error = null;
 
@@ -109,9 +112,9 @@ export const synthesizeOpenAISpeech = async (
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify({
-			model: model,
 			input: text,
-			voice: speaker
+			voice: speaker,
+			...(model && { model })
 		})
 	})
 		.then(async (res) => {
@@ -120,7 +123,67 @@ export const synthesizeOpenAISpeech = async (
 		})
 		.catch((err) => {
 			error = err.detail;
-			console.log(err);
+			console.error(err);
+
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+interface AvailableModelsResponse {
+	models: { name: string; id: string }[] | { id: string }[];
+}
+
+export const getModels = async (token: string = ''): Promise<AvailableModelsResponse> => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/models`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getVoices = async (token: string = '') => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/voices`, {
+		method: 'GET',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
 
 			return null;
 		});

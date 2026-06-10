@@ -6,298 +6,471 @@
 	const { saveAs } = fileSaver;
 
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
+	import { fade } from 'svelte/transition';
 
-	import { getModels as _getModels } from '$lib/utils';
-	import { getOllamaVersion } from '$lib/apis/ollama';
-	import { getModelfiles } from '$lib/apis/modelfiles';
-	import { getPrompts } from '$lib/apis/prompts';
+	import { getModels, getToolServersData, getVersionUpdates } from '$lib/apis';
+	import { getTools } from '$lib/apis/tools';
+	import { getBanners } from '$lib/apis/configs';
+	import { getTerminalServers } from '$lib/apis/terminal';
+	import { getUserSettings } from '$lib/apis/users';
 
-	import { getDocs } from '$lib/apis/documents';
-	import { getAllChatTags } from '$lib/apis/chats';
-
-	import {
-		user,
-		showSettings,
-		settings,
-		models,
-		modelfiles,
-		prompts,
-		documents,
-		tags,
-		showChangelog,
-		config
-	} from '$lib/stores';
-	import { REQUIRED_OLLAMA_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
+	import { WEBUI_VERSION, WEBUI_API_BASE_URL } from '$lib/constants';
 	import { compareVersion } from '$lib/utils';
 
-	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
+	import {
+		config,
+		user,
+		settings,
+		models,
+		knowledge,
+		tools,
+		functions,
+		tags,
+		banners,
+		showSettings,
+		showShortcuts,
+		showChangelog,
+		temporaryChatEnabled,
+		toolServers,
+		terminalServers,
+		selectedTerminalId,
+		showSearch,
+		showSidebar,
+		showControls,
+		mobile
+	} from '$lib/stores';
+
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
-	import ShortcutsModal from '$lib/components/chat/ShortcutsModal.svelte';
+	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import ChangelogModal from '$lib/components/ChangelogModal.svelte';
-	import Tooltip from '$lib/components/common/Tooltip.svelte';
+	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
+	import UpdateInfoToast from '$lib/components/layout/UpdateInfoToast.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	import { Shortcut, shortcuts } from '$lib/shortcuts';
 
 	const i18n = getContext('i18n');
 
-	let ollamaVersion = '';
 	let loaded = false;
-	let showShortcutsButtonElement: HTMLButtonElement;
 	let DB = null;
 	let localDBChats = [];
 
-	let showShortcuts = false;
+	let version;
 
-	const getModels = async () => {
-		return _getModels(localStorage.token);
-	};
-
-	const setOllamaVersion = async (version: string = '') => {
-		if (version === '') {
-			version = await getOllamaVersion(localStorage.token).catch((error) => {
-				return '';
+	const clearChatInputStorage = () => {
+		const chatInputKeys = Object.keys(localStorage).filter((key) => key.startsWith('chat-input'));
+		if (chatInputKeys.length > 0) {
+			chatInputKeys.forEach((key) => {
+				localStorage.removeItem(key);
 			});
 		}
+	};
 
-		ollamaVersion = version;
+	const checkLocalDBChats = async () => {
+		try {
+			// Check if IndexedDB exists
+			DB = await openDB('Chats', 1);
 
-		console.log(ollamaVersion);
-		if (compareVersion(REQUIRED_OLLAMA_VERSION, ollamaVersion)) {
-			toast.error(`Ollama Version: ${ollamaVersion !== '' ? ollamaVersion : 'Not Detected'}`);
+			if (!DB) {
+				return;
+			}
+
+			const chats = await DB.getAllFromIndex('chats', 'timestamp');
+			localDBChats = chats.map((item, idx) => chats[chats.length - 1 - idx]);
+
+			if (localDBChats.length === 0) {
+				await deleteDB('Chats');
+			}
+		} catch (error) {
+			// IndexedDB Not Found
 		}
+	};
+
+	const setUserSettings = async (cb: () => Promise<void>) => {
+		let userSettings = await getUserSettings(localStorage.token).catch((error) => {
+			console.error(error);
+			return null;
+		});
+
+		if (!userSettings) {
+			try {
+				userSettings = JSON.parse(localStorage.getItem('settings') ?? '{}');
+			} catch (e: unknown) {
+				console.error('Failed to parse settings from localStorage', e);
+				userSettings = {};
+			}
+		}
+
+		if (userSettings?.ui) {
+			settings.set(userSettings.ui);
+		}
+
+		if (cb) {
+			await cb();
+		}
+	};
+
+	const setModels = async () => {
+		models.set(
+			await getModels(
+				localStorage.token,
+				$config?.features?.enable_direct_connections ? ($settings?.directConnections ?? null) : null
+			)
+		);
+	};
+
+	const setToolServers = async () => {
+		let toolServersData = await getToolServersData($settings?.toolServers ?? []);
+		toolServersData = toolServersData.filter((data) => {
+			if (!data || data.error) {
+				toast.error(
+					$i18n.t(`Failed to connect to {{URL}} OpenAPI tool server`, {
+						URL: data?.url
+					})
+				);
+				return false;
+			}
+			return true;
+		});
+		toolServers.set(toolServersData);
+
+		// Inject enabled terminal servers as always-on tool servers
+		const enabledTerminals = ($settings?.terminalServers ?? []).filter((s) => s.enabled);
+		if (enabledTerminals.length > 0) {
+			let terminalServersData = await getToolServersData(
+				enabledTerminals.map((t) => ({
+					url: t.url,
+					auth_type: t.auth_type ?? 'bearer',
+					key: t.key ?? '',
+					path: t.path ?? '/openapi.json',
+					config: { enable: true }
+				}))
+			);
+			terminalServersData = terminalServersData
+				.filter((data) => {
+					if (!data || data.error) {
+						toast.error(
+							$i18n.t(`Failed to connect to {{URL}} terminal server`, {
+								URL: data?.url
+							})
+						);
+						return false;
+					}
+					return true;
+				})
+				.map((data, i) => ({
+					...data,
+					key: enabledTerminals[i]?.key ?? ''
+				}));
+
+			terminalServers.set(terminalServersData);
+		} else {
+			terminalServers.set([]);
+		}
+
+		// Fetch terminal servers the user has access to (for FileNav + terminal_id)
+		const systemTerminals = await getTerminalServers(localStorage.token);
+		if (systemTerminals.length > 0) {
+			// Store with proxy URL and session key for FileNav file browsing
+			const terminalEntries = systemTerminals.map((t) => ({
+				id: t.id,
+				url: `${WEBUI_API_BASE_URL}/terminals/${t.id}`,
+				name: t.name,
+				key: localStorage.token
+			}));
+			terminalServers.update((existing) => [...existing, ...terminalEntries]);
+		}
+	};
+
+	const setBanners = async () => {
+		const bannersData = await getBanners(localStorage.token);
+		banners.set(bannersData);
+	};
+
+	const setTools = async () => {
+		const toolsData = await getTools(localStorage.token);
+		tools.set(toolsData);
 	};
 
 	onMount(async () => {
-		if ($user === undefined) {
+		if ($user === undefined || $user === null) {
 			await goto('/auth');
-		} else if (['user', 'admin'].includes($user.role)) {
-			try {
-				// Check if IndexedDB exists
-				DB = await openDB('Chats', 1);
-
-				if (DB) {
-					const chats = await DB.getAllFromIndex('chats', 'timestamp');
-					localDBChats = chats.map((item, idx) => chats[chats.length - 1 - idx]);
-
-					if (localDBChats.length === 0) {
-						await deleteDB('Chats');
-					}
-				}
-
-				console.log(DB);
-			} catch (error) {
-				// IndexedDB Not Found
-			}
-
-			await models.set(await getModels());
-			await settings.set(JSON.parse(localStorage.getItem('settings') ?? '{}'));
-
-			await modelfiles.set(await getModelfiles(localStorage.token));
-			await prompts.set(await getPrompts(localStorage.token));
-			await documents.set(await getDocs(localStorage.token));
-			await tags.set(await getAllChatTags(localStorage.token));
-
-			modelfiles.subscribe(async () => {
-				// should fetch models
-				await models.set(await getModels());
-			});
-
-			document.addEventListener('keydown', function (event) {
-				const isCtrlPressed = event.ctrlKey || event.metaKey; // metaKey is for Cmd key on Mac
-				// Check if the Shift key is pressed
-				const isShiftPressed = event.shiftKey;
-
-				// Check if Ctrl + Shift + O is pressed
-				if (isCtrlPressed && isShiftPressed && event.key.toLowerCase() === 'o') {
-					event.preventDefault();
-					console.log('newChat');
-					document.getElementById('sidebar-new-chat-button')?.click();
-				}
-
-				// Check if Shift + Esc is pressed
-				if (isShiftPressed && event.key === 'Escape') {
-					event.preventDefault();
-					console.log('focusInput');
-					document.getElementById('chat-textarea')?.focus();
-				}
-
-				// Check if Ctrl + Shift + ; is pressed
-				if (isCtrlPressed && isShiftPressed && event.key === ';') {
-					event.preventDefault();
-					console.log('copyLastCodeBlock');
-					const button = [...document.getElementsByClassName('copy-code-button')]?.at(-1);
-					button?.click();
-				}
-
-				// Check if Ctrl + Shift + C is pressed
-				if (isCtrlPressed && isShiftPressed && event.key.toLowerCase() === 'c') {
-					event.preventDefault();
-					console.log('copyLastResponse');
-					const button = [...document.getElementsByClassName('copy-response-button')]?.at(-1);
-					console.log(button);
-					button?.click();
-				}
-
-				// Check if Ctrl + Shift + S is pressed
-				if (isCtrlPressed && isShiftPressed && event.key.toLowerCase() === 's') {
-					event.preventDefault();
-					console.log('toggleSidebar');
-					document.getElementById('sidebar-toggle-button')?.click();
-				}
-
-				// Check if Ctrl + Shift + Backspace is pressed
-				if (isCtrlPressed && isShiftPressed && event.key === 'Backspace') {
-					event.preventDefault();
-					console.log('deleteChat');
-					document.getElementById('delete-chat-button')?.click();
-				}
-
-				// Check if Ctrl + . is pressed
-				if (isCtrlPressed && event.key === '.') {
-					event.preventDefault();
-					console.log('openSettings');
-					showSettings.set(!$showSettings);
-				}
-
-				// Check if Ctrl + / is pressed
-				if (isCtrlPressed && event.key === '/') {
-					event.preventDefault();
-					console.log('showShortcuts');
-					showShortcutsButtonElement.click();
-				}
-			});
-
-			if ($user.role === 'admin') {
-				showChangelog.set(localStorage.version !== $config.version);
-			}
-
-			await tick();
+			return;
 		}
+		if (!['user', 'admin'].includes($user?.role)) {
+			return;
+		}
+
+		clearChatInputStorage();
+		await Promise.all([
+			checkLocalDBChats(),
+			setBanners().catch((e) => console.error('Failed to load banners:', e)),
+			setTools().catch((e) => console.error('Failed to load tools:', e)),
+			setUserSettings(async () => {
+				await Promise.all([
+					setModels().catch((e) => console.error('Failed to load models:', e)),
+					setToolServers().catch((e) => console.error('Failed to load tool servers:', e))
+				]);
+			}).catch((e) => console.error('Failed to load user settings:', e))
+		]);
+
+		// Helper function to check if the pressed keys match the shortcut definition
+		const isShortcutMatch = (event: KeyboardEvent, shortcut): boolean => {
+			const keys = shortcut?.keys || [];
+
+			const normalized = keys.map((k) => k.toLowerCase());
+			const needCtrl = normalized.includes('ctrl') || normalized.includes('mod');
+			const needShift = normalized.includes('shift');
+			const needAlt = normalized.includes('alt');
+
+			const mainKeys = normalized.filter((k) => !['ctrl', 'shift', 'alt', 'mod'].includes(k));
+
+			// Get the main key pressed
+			const keyPressed = event.key.toLowerCase();
+
+			// Check modifiers
+			if (needShift && !event.shiftKey) return false;
+
+			if (needCtrl && !(event.ctrlKey || event.metaKey)) return false;
+			if (!needCtrl && (event.ctrlKey || event.metaKey)) return false;
+			if (needAlt && !event.altKey) return false;
+			if (!needAlt && event.altKey) return false;
+
+			if (mainKeys.length && !mainKeys.includes(keyPressed)) return false;
+
+			return true;
+		};
+
+		const setupKeyboardShortcuts = () => {
+			document.addEventListener('keydown', async (event) => {
+				if (isShortcutMatch(event, shortcuts[Shortcut.SEARCH])) {
+					console.log('Shortcut triggered: SEARCH');
+					event.preventDefault();
+					showSearch.set(!$showSearch);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.NEW_CHAT])) {
+					console.log('Shortcut triggered: NEW_CHAT');
+					event.preventDefault();
+					document.getElementById('sidebar-new-chat-button')?.click();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.FOCUS_INPUT])) {
+					console.log('Shortcut triggered: FOCUS_INPUT');
+					event.preventDefault();
+					document.getElementById('chat-input')?.focus();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.COPY_LAST_CODE_BLOCK])) {
+					console.log('Shortcut triggered: COPY_LAST_CODE_BLOCK');
+					event.preventDefault();
+					[...document.getElementsByClassName('copy-code-button')]?.at(-1)?.click();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.COPY_LAST_RESPONSE])) {
+					console.log('Shortcut triggered: COPY_LAST_RESPONSE');
+					event.preventDefault();
+					[...document.getElementsByClassName('copy-response-button')]?.at(-1)?.click();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.TOGGLE_SIDEBAR])) {
+					console.log('Shortcut triggered: TOGGLE_SIDEBAR');
+					event.preventDefault();
+					showSidebar.set(!$showSidebar);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.DELETE_CHAT])) {
+					console.log('Shortcut triggered: DELETE_CHAT');
+					event.preventDefault();
+					document.getElementById('delete-chat-button')?.click();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.OPEN_SETTINGS])) {
+					console.log('Shortcut triggered: OPEN_SETTINGS');
+					event.preventDefault();
+					showSettings.set(!$showSettings);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.SHOW_SHORTCUTS])) {
+					console.log('Shortcut triggered: SHOW_SHORTCUTS');
+					event.preventDefault();
+					showShortcuts.set(!$showShortcuts);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.CLOSE_MODAL])) {
+					console.log('Shortcut triggered: CLOSE_MODAL');
+					event.preventDefault();
+					showSettings.set(false);
+					showShortcuts.set(false);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.OPEN_MODEL_SELECTOR])) {
+					console.log('Shortcut triggered: OPEN_MODEL_SELECTOR');
+					event.preventDefault();
+					document.getElementById('model-selector-0-button')?.click();
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.NEW_TEMPORARY_CHAT])) {
+					console.log('Shortcut triggered: NEW_TEMPORARY_CHAT');
+					event.preventDefault();
+					if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
+						temporaryChatEnabled.set(true);
+					} else {
+						temporaryChatEnabled.set(!$temporaryChatEnabled);
+					}
+					await goto('/');
+					setTimeout(() => {
+						document.getElementById('new-chat-button')?.click();
+					}, 0);
+				} else if (isShortcutMatch(event, shortcuts[Shortcut.GENERATE_MESSAGE_PAIR])) {
+					console.log('Shortcut triggered: GENERATE_MESSAGE_PAIR');
+					event.preventDefault();
+					document.getElementById('generate-message-pair-button')?.click();
+				} else if (
+					isShortcutMatch(event, shortcuts[Shortcut.REGENERATE_RESPONSE]) &&
+					document.activeElement?.id === 'chat-input'
+				) {
+					console.log('Shortcut triggered: REGENERATE_RESPONSE');
+					event.preventDefault();
+					[...document.getElementsByClassName('regenerate-response-button')]?.at(-1)?.click();
+				}
+			});
+		};
+		setupKeyboardShortcuts();
+
+		if ($user?.role === 'admin' && ($settings?.showChangelog ?? true)) {
+			showChangelog.set($settings?.version !== $config.version);
+		}
+
+		if ($user?.role === 'admin' || ($user?.permissions?.chat?.temporary ?? true)) {
+			if ($page.url.searchParams.get('temporary-chat') === 'true') {
+				temporaryChatEnabled.set(true);
+			}
+
+			if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
+				temporaryChatEnabled.set(true);
+			}
+		}
+
+		// Check for version updates
+		if ($user?.role === 'admin' && $config?.features?.enable_version_update_check) {
+			// Check if the user has dismissed the update toast in the last 24 hours
+			if (localStorage.dismissedUpdateToast) {
+				const dismissedUpdateToast = new Date(Number(localStorage.dismissedUpdateToast));
+				const now = new Date();
+
+				if (now - dismissedUpdateToast > 24 * 60 * 60 * 1000) {
+					checkForVersionUpdates();
+				}
+			} else {
+				checkForVersionUpdates();
+			}
+		}
+		// Persist showControls: track open/close state separately from saved size
+		// chatControlsSize always retains the last width for openPane()
+		await showControls.set(!$mobile ? localStorage.showControls === 'true' : false);
+		showControls.subscribe((value) => {
+			localStorage.showControls = value ? 'true' : 'false';
+		});
+
+		// Persist selectedTerminalId across page loads
+		selectedTerminalId.set(localStorage.selectedTerminalId ?? null);
+		selectedTerminalId.subscribe((value) => {
+			if (value === null) {
+				delete localStorage.selectedTerminalId;
+			} else {
+				localStorage.selectedTerminalId = value;
+			}
+		});
+
+		await tick();
 
 		loaded = true;
 	});
+
+	const checkForVersionUpdates = async () => {
+		version = await getVersionUpdates(localStorage.token).catch((error) => {
+			return {
+				current: WEBUI_VERSION,
+				latest: WEBUI_VERSION
+			};
+		});
+	};
 </script>
 
-<div class=" hidden lg:flex fixed bottom-0 right-0 px-3 py-3 z-10">
-	<Tooltip content={$i18n.t('Help')} placement="left">
-		<button
-			id="show-shortcuts-button"
-			bind:this={showShortcutsButtonElement}
-			class="text-gray-600 dark:text-gray-300 bg-gray-300/20 w-6 h-6 flex items-center justify-center text-xs rounded-full"
-			on:click={() => {
-				showShortcuts = !showShortcuts;
-			}}
-		>
-			?
-		</button>
-	</Tooltip>
-</div>
-
-<ShortcutsModal bind:show={showShortcuts} />
 <SettingsModal bind:show={$showSettings} />
 <ChangelogModal bind:show={$showChangelog} />
 
-<div class="app relative">
-	<div
-		class=" text-gray-700 dark:text-gray-100 bg-white dark:bg-gray-900 min-h-screen overflow-auto flex flex-row"
-	>
-		{#if loaded}
-			{#if !['user', 'admin'].includes($user.role)}
-				<div class="fixed w-full h-full flex z-[999]">
-					<div
-						class="absolute w-full h-full backdrop-blur-lg bg-white/10 dark:bg-gray-900/50 flex justify-center"
-					>
-						<div class="m-auto pb-10 flex flex-col justify-center">
-							<div class="max-w-md">
-								<div class="text-center dark:text-white text-2xl font-medium z-50">
-									Account Activation Pending<br /> Contact Admin for WebUI Access
-								</div>
-
-								<div class=" mt-4 text-center text-sm dark:text-gray-200 w-full">
-									Your account status is currently pending activation. To access the WebUI, please
-									reach out to the administrator. Admins can manage user statuses from the Admin
-									Panel.
-								</div>
-
-								<div class=" mt-6 mx-auto relative group w-fit">
-									<button
-										class="relative z-20 flex px-5 py-2 rounded-full bg-white border border-gray-100 dark:border-none hover:bg-gray-100 text-gray-700 transition font-medium text-sm"
-										on:click={async () => {
-											location.href = '/';
-										}}
-									>
-										{$i18n.t('Check Again')}
-									</button>
-
-									<button
-										class="text-xs text-center w-full mt-2 text-gray-400 underline"
-										on:click={async () => {
-											localStorage.removeItem('token');
-											location.href = '/auth';
-										}}>{$i18n.t('Sign Out')}</button
-									>
-								</div>
-							</div>
-						</div>
-					</div>
-				</div>
-			{:else if localDBChats.length > 0}
-				<div class="fixed w-full h-full flex z-50">
-					<div
-						class="absolute w-full h-full backdrop-blur-md bg-white/20 dark:bg-gray-900/50 flex justify-center"
-					>
-						<div class="m-auto pb-44 flex flex-col justify-center">
-							<div class="max-w-md">
-								<div class="text-center dark:text-white text-2xl font-medium z-50">
-									Important Update<br /> Action Required for Chat Log Storage
-								</div>
-
-								<div class=" mt-4 text-center text-sm dark:text-gray-200 w-full">
-									{$i18n.t(
-										"Saving chat logs directly to your browser's storage is no longer supported. Please take a moment to download and delete your chat logs by clicking the button below. Don't worry, you can easily re-import your chat logs to the backend through"
-									)}
-									<span class="font-semibold dark:text-white"
-										>{$i18n.t('Settings')} > {$i18n.t('Chats')} > {$i18n.t('Import Chats')}</span
-									>. {$i18n.t(
-										'This ensures that your valuable conversations are securely saved to your backend database. Thank you!'
-									)}
-								</div>
-
-								<div class=" mt-6 mx-auto relative group w-fit">
-									<button
-										class="relative z-20 flex px-5 py-2 rounded-full bg-white border border-gray-100 dark:border-none hover:bg-gray-100 transition font-medium text-sm"
-										on:click={async () => {
-											let blob = new Blob([JSON.stringify(localDBChats)], {
-												type: 'application/json'
-											});
-											saveAs(blob, `chat-export-${Date.now()}.json`);
-
-											const tx = DB.transaction('chats', 'readwrite');
-											await Promise.all([tx.store.clear(), tx.done]);
-											await deleteDB('Chats');
-
-											localDBChats = [];
-										}}
-									>
-										Download & Delete
-									</button>
-
-									<button
-										class="text-xs text-center w-full mt-2 text-gray-400 underline"
-										on:click={async () => {
-											localDBChats = [];
-										}}>{$i18n.t('Close')}</button
-									>
-								</div>
-							</div>
-						</div>
-					</div>
-				</div>
-			{/if}
-
-			<Sidebar />
-			<slot />
-		{/if}
+{#if version && compareVersion(version.latest, version.current) && ($settings?.showUpdateToast ?? true)}
+	<div class=" absolute bottom-8 right-8 z-50" in:fade={{ duration: 100 }}>
+		<UpdateInfoToast
+			{version}
+			on:close={() => {
+				localStorage.setItem('dismissedUpdateToast', Date.now().toString());
+				version = null;
+			}}
+		/>
 	</div>
-</div>
+{/if}
+
+{#if $user}
+	<div class="app relative">
+		<div
+			class=" text-gray-700 dark:text-gray-100 bg-white dark:bg-gray-900 h-screen max-h-[100dvh] overflow-auto flex flex-row justify-end"
+		>
+			{#if !['user', 'admin'].includes($user?.role)}
+				<AccountPending />
+			{:else}
+				{#if localDBChats.length > 0}
+					<div class="fixed w-full h-full flex z-50">
+						<div
+							class="absolute w-full h-full backdrop-blur-md bg-white/20 dark:bg-gray-900/50 flex justify-center"
+						>
+							<div class="m-auto pb-44 flex flex-col justify-center">
+								<div class="max-w-md">
+									<div class="text-center dark:text-white text-2xl font-medium z-50">
+										{$i18n.t('Important Update')}<br />
+										{$i18n.t('Action Required for Chat Log Storage')}
+									</div>
+
+									<div class=" mt-4 text-center text-sm dark:text-gray-200 w-full">
+										{$i18n.t(
+											"Saving chat logs directly to your browser's storage is no longer supported. Please take a moment to download and delete your chat logs by clicking the button below. Don't worry, you can easily re-import your chat logs to the backend through"
+										)}
+										<span class="font-medium dark:text-white"
+											>{$i18n.t('Settings')} > {$i18n.t('Chats')} > {$i18n.t('Import Chats')}</span
+										>. {$i18n.t(
+											'This ensures that your valuable conversations are securely saved to your backend database. Thank you!'
+										)}
+									</div>
+
+									<div class=" mt-6 mx-auto relative group w-fit">
+										<button
+											class="relative z-20 flex px-5 py-2 rounded-full bg-white border border-gray-100 dark:border-none hover:bg-gray-100 transition font-medium text-sm"
+											on:click={async () => {
+												let blob = new Blob([JSON.stringify(localDBChats)], {
+													type: 'application/json'
+												});
+												saveAs(blob, `chat-export-${Date.now()}.json`);
+
+												const tx = DB.transaction('chats', 'readwrite');
+												await Promise.all([tx.store.clear(), tx.done]);
+												await deleteDB('Chats');
+
+												localDBChats = [];
+											}}
+										>
+											{$i18n.t('Download & Delete')}
+										</button>
+
+										<button
+											class="text-xs text-center w-full mt-2 text-gray-400 underline"
+											on:click={async () => {
+												localDBChats = [];
+											}}>{$i18n.t('Close')}</button
+										>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				{/if}
+
+				<Sidebar />
+
+				{#if loaded}
+					<slot />
+				{:else}
+					<div
+						class="w-full flex-1 h-full flex items-center justify-center {$showSidebar
+							? '  md:max-w-[calc(100%-var(--sidebar-width))]'
+							: ' '}"
+					>
+						<Spinner className="size-5" />
+					</div>
+				{/if}
+			{/if}
+		</div>
+	</div>
+{/if}
 
 <style>
 	.loading {

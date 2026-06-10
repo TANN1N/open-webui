@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { getBackendConfig } from '$lib/apis';
-	import { setDefaultPromptSuggestions } from '$lib/apis/configs';
 	import Switch from '$lib/components/common/Switch.svelte';
 	import { config, models, settings, user } from '$lib/stores';
 	import { createEventDispatcher, onMount, getContext, tick } from 'svelte';
@@ -19,33 +17,37 @@
 	let enableMemory = false;
 
 	onMount(async () => {
-		let settings = JSON.parse(localStorage.getItem('settings') ?? '{}');
-		enableMemory = settings?.memory ?? false;
+		enableMemory = $settings?.memory ?? false;
 	});
 </script>
 
 <ManageModal bind:show={showManageModal} />
 
 <form
+	id="tab-personalization"
 	class="flex flex-col h-full justify-between space-y-3 text-sm"
 	on:submit|preventDefault={() => {
 		dispatch('save');
 	}}
 >
-	<div class="  pr-1.5 overflow-y-scroll max-h-[25rem]">
+	<div class="py-1 overflow-y-scroll max-h-[28rem] md:max-h-full">
 		<div>
 			<div class="flex items-center justify-between mb-1">
 				<Tooltip
-					content="This is an experimental feature, it may not function as expected and is subject to change at any time."
+					content={$i18n.t(
+						'This is an experimental feature, it may not function as expected and is subject to change at any time.'
+					)}
 				>
-					<div class="text-sm font-medium">
+					<div class="flex items-center gap-2 text-sm font-medium">
 						{$i18n.t('Memory')}
-
-						<span class=" text-xs text-gray-500">({$i18n.t('Experimental')})</span>
+						<span
+							class="text-[0.65rem] font-medium uppercase px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+							>{$i18n.t('Experimental')}</span
+						>
 					</div>
 				</Tooltip>
 
-				<div class="mt-1">
+				<div class="">
 					<Switch
 						bind:state={enableMemory}
 						on:change={async () => {
@@ -58,8 +60,9 @@
 
 		<div class="text-xs text-gray-600 dark:text-gray-400">
 			<div>
-				You can personalize your interactions with LLMs by adding memories through the 'Manage'
-				button below, making them more helpful and tailored to you.
+				{$i18n.t(
+					"You can personalize your interactions with LLMs by adding memories through the 'Manage' button below, making them more helpful and tailored to you."
+				)}
 			</div>
 
 			<!-- <div class="mt-3">
@@ -80,14 +83,14 @@
 					showManageModal = true;
 				}}
 			>
-				Manage
+				{$i18n.t('Manage')}
 			</button>
 		</div>
 	</div>
 
 	<div class="flex justify-end text-sm font-medium">
 		<button
-			class=" px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-gray-100 transition rounded-lg"
+			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full"
 			type="submit"
 		>
 			{$i18n.t('Save')}
